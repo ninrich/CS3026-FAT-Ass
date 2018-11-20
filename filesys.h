@@ -9,6 +9,8 @@
 #define FILESYS_H
 
 #include <time.h>
+#include <string.h>
+#include <stdio.h>
 
 #ifndef TRUE
 #define TRUE 1
@@ -24,9 +26,12 @@
 #define MAXNAME       256
 #define MAXPATHLENGTH 1024
 
-#define UNUSED        -1
+#define LINELENGTH    64
+#define TEXTFILESIZE 4096
+
+#define UNUSED        (-1)
 #define ENDOFCHAIN     0
-#define EOF           -1
+#define EOF           (-1)
 
 
 typedef unsigned char Byte ;
@@ -102,11 +107,23 @@ typedef struct filedescriptor {
 
 void format() ;
 void writedisk ( const char * filename ) ;
-void reset_block (diskblock_t block) ;
+void reset_block (diskblock_t * block) ;
 void printBlock ( int blockIndex ) ;
 void copy_FAT();
+MyFILE * myfopen(const char * filename, const char * mode);
+void myfclose(MyFILE * stream);
+int myfgetc(MyFILE * stream);
+void myfputc(int b, MyFILE * stream);
 
+int get_file_location(const char *filename);
 
+void end_chain(int index);
+void clear_directory(const char * filename);
+
+void task_d();
+void task_c();
+void task_b();
+void task_a();
 #endif
 
 /*

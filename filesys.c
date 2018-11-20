@@ -39,6 +39,7 @@ void readdisk ( const char * filename )
       fprintf ( stderr, "write virtual disk to disk failed\n" ) ;
    //write( dest, virtualDisk, sizeof(virtualDisk) ) ;
    fclose(dest) ;
+
 }
 
 
@@ -53,6 +54,10 @@ void writeblock ( diskblock_t * block, int block_address )
    //printf ( "writeblock> virtualdisk[%d] = %s / %d\n", block_address, virtualDisk[block_address].data, (int)virtualDisk[block_address].data ) ;
 }
 
+void read_block(diskblock_t *block, int block_address)
+{
+    memmove(block->data, virtualDisk[block_address].data, BLOCKSIZE);
+}
 
 /* read and write FAT
  * 
@@ -87,7 +92,7 @@ void format ( )
 
    // initialize block 0
    block = virtualDisk[0];
-   reset_block(block);
+   reset_block(&block);
    strcpy((char *) block.data, "good evening");
    writeblock(&block, 0) ;
 
@@ -125,7 +130,15 @@ void format ( )
     rootDirIndex = (fatentry_t) (fatblocksneeded + 1);
     //write to disk
     writeblock((diskblock_t *) &root_block, rootDirIndex);
+    currentDirIndex = rootDirIndex;
 
+}
+
+diskblock_t create_empty_block()
+{
+    diskblock_t new_block;
+    reset_block(&new_block);
+    return new_block;
 }
 
 void copy_FAT()
@@ -143,18 +156,193 @@ void copy_FAT()
     }
 }
 
-void reset_block (diskblock_t block)
+int get_first_free_block()
+{
+    for (int i = rootDirIndex + 1; i < MAXBLOCKS; i++)
+        if (FAT[i] == UNUSED)
+            return i;
+    return FALSE;
+}
+
+void reset_block (diskblock_t * block)
 {
     for (int i = 0; i < BLOCKSIZE; i++)
-        block.data[i] = '\0';
+        block->data[i] = '\0';
 }
 
 
-/* use this for testing
- */
 
+int myfgetc (MyFILE * stream)
+{
+
+    if (stream->blockno == ENDOFCHAIN
+    || strcmp(stream->mode, "r") != 0)
+        return EOF;
+
+    if (stream->pos % BLOCKSIZE == 0) {
+        memcpy(&stream->buffer, &virtualDisk[stream->blockno], BLOCKSIZE);
+        stream->blockno = FAT[stream->blockno];
+
+        stream->pos = 0;
+    }
+    return stream->buffer.data[stream->pos++];
+}
+
+void myfputc(int b, MyFILE * stream)
+{
+    if (strcmp(stream->mode, "r") == 0)
+        return;
+
+    if (stream->pos >= BLOCKSIZE) {
+       int new_block_index = get_first_free_block();
+       FAT[stream->blockno] = (fatentry_t) new_block_index;
+       FAT[new_block_index] = ENDOFCHAIN;
+       copy_FAT();
+
+       stream->pos = 0;
+       writeblock(&stream->buffer, stream->blockno);
+
+       stream->buffer = create_empty_block();
+       stream->blockno = (fatentry_t) new_block_index;
+    }
+    stream->buffer.data[stream->pos] = (Byte) b;
+    stream->pos++;
+
+}
+
+MyFILE * myfopen(const char * filename, const char * mode)
+{
+    if (! (strcmp(mode, "w") == 0 || strcmp(mode, "r") == 0) ) {
+        printf("Wrong mode selected.\nUse \"w\" or \"r\".");
+        return FALSE;
+    }
+
+    int file_location;
+    if ( (file_location = get_file_location(filename)) == FALSE ) {
+        // file doesn't exist
+        if (strcmp(mode, "r") == 0) {
+            // read mode file doesn't exist
+            printf("Trying to read a nonexisting file");
+            exit(1);
+        } else {
+            // write mode file doesn't exist
+            int index = get_first_free_block(); // check if directory full
+
+            // create a new directory entry
+            direntry_t * new_dir_entry = calloc(1, sizeof(direntry_t));
+            new_dir_entry->unused = FALSE;
+            new_dir_entry->isdir = FALSE;
+            new_dir_entry->filelength = 0;
+            new_dir_entry->firstblock = (fatentry_t) index;
+
+            FAT[index] = ENDOFCHAIN;
+            copy_FAT();
+
+            diskblock_t block;
+            read_block(&block, currentDirIndex);
+
+            int entry_number = block.dir.nextEntry;
+            currentDir = block.dir.entrylist;
+            currentDir[entry_number] = *new_dir_entry;
+            strcpy(currentDir[entry_number].name, filename);
+
+            block.dir.nextEntry++;
+            writeblock(&block, currentDirIndex);
+
+
+            MyFILE * new_file = malloc(sizeof(MyFILE));
+            new_file->pos = 0;
+            strcpy(new_file->mode, mode);
+            new_file->blockno = (fatentry_t) index;
+
+            free(new_dir_entry);
+            return new_file;
+        }
+    } else {
+        // file exists
+        if (strcmp(mode, "r") == 0) {
+            // read mode file exist
+            MyFILE *file = malloc(sizeof(MyFILE));
+            memcpy(file->mode, mode, sizeof(char[3]));
+            file->pos = 0;
+            file->buffer = create_empty_block(); /////////////////////////////////////////////
+            file->blockno = (fatentry_t) file_location;
+            return file;
+        } else {
+            // write mode file exists
+            if (file_location < BLOCKSIZE/FATENTRYCOUNT + 1) {
+                printf("Trying to write to reserver blocks ( storage info or FAT table )");
+                exit(1);
+            }
+            end_chain(file_location);
+            copy_FAT();
+            clear_directory(filename);
+        }
+
+    }
+}
+
+void clear_directory(const char * filename)
+{
+    diskblock_t directory_block;
+    fatentry_t next_dir = rootDirIndex;
+
+    while(next_dir != ENDOFCHAIN)
+    {
+        currentDirIndex = next_dir;
+        memmove(&directory_block.data, virtualDisk[next_dir].data, BLOCKSIZE);
+        currentDir = directory_block.dir.entrylist;
+        for (int i = 0; i < directory_block.dir.nextEntry; i++)
+            if (strcmp(currentDir[i].name, filename) == 0)
+            {
+                currentDir[i].firstblock = (fatentry_t) get_first_free_block();
+                currentDir[i].entrylength = sizeof(currentDir);
+                return;
+            }
+        next_dir = FAT[next_dir];
+    }
+}
+
+void end_chain(index)
+{
+    int next = FAT[index];
+    while (next != ENDOFCHAIN)
+        next = FAT[next];
+
+    diskblock_t block = create_empty_block();
+    memmove(virtualDisk[index].data, &block.data, BLOCKSIZE);
+    FAT[index] = UNUSED;
+}
+
+void myfclose(MyFILE * stream)
+{
+    int next = get_first_free_block();
+    FAT[stream->blockno] = (fatentry_t) next;
+    FAT[next] = ENDOFCHAIN;
+    copy_FAT();
+    memmove(virtualDisk[stream->blockno].data, &stream->buffer.data, BLOCKSIZE);
+    free(stream);
+
+}
 void printBlock ( int blockIndex )
 {
    printf ( "virtualdisk[%d] = %s\n", blockIndex, virtualDisk[blockIndex].data ) ;
 }
 
+int get_file_location(const char *filename)
+{
+    diskblock_t dir_block;
+    fatentry_t next_dir = rootDirIndex;
+
+    while(next_dir != ENDOFCHAIN)
+    {
+        currentDirIndex = next_dir;
+        memmove(&dir_block.data, virtualDisk[next_dir].data, BLOCKSIZE);
+        currentDir = dir_block.dir.entrylist;
+        for(int i=0; i < dir_block.dir.nextEntry; i++)
+            if(strcmp(currentDir[i].name, filename) == 0)
+                return currentDir[i].firstblock;
+        next_dir = FAT[next_dir];
+    }
+    return FALSE;
+}
